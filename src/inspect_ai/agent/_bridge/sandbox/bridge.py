@@ -27,7 +27,7 @@ from inspect_ai.tool._tools._web_search._web_search import (
 )
 from inspect_ai.util._anyio import inner_exception
 from inspect_ai.util._checkpoint.checkpointer import Checkpointer
-from inspect_ai.util._sandbox._cli import SANDBOX_CLI
+from inspect_ai.util._sandbox._cli import sandbox_tools_command
 from inspect_ai.util._sandbox.exec_remote import (
     ExecCompleted,
     ExecRemoteProcess,
@@ -283,7 +283,7 @@ async def sandbox_agent_bridge(
 
             # proxy server that runs in container and forwards to sandbox service
             proxy = await sandbox_env.exec_remote(
-                cmd=[SANDBOX_CLI, "model_proxy"],
+                cmd=[*sandbox_tools_command(sandbox_env), "model_proxy"],
                 options=ExecRemoteStreamingOptions(
                     concurrency=False,
                     user=sandbox_env._tools_user,

@@ -3,7 +3,8 @@
 The tools ship as a PyInstaller --onedir bundle (a launcher executable plus an
 ``_internal`` directory), so what is injected is a directory tree rather than a single
 file. ``SANDBOX_TOOLS_DIR`` is where the tree is extracted, and ``SANDBOX_CLI`` is the
-launcher inside it.
+launcher inside it. On macOS, the local sandbox runs the bundled helper source
+with the host Python interpreter instead of installing a Linux executable.
 
 We choose /var/tmp as the injection location since:
   1) it is accessible in all major linux distributions
@@ -27,6 +28,7 @@ protocol. With a path per version, a tree is only ever reused by the version tha
 installed it, and trees (and running servers) from other versions are left alone.
 """
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -57,6 +59,28 @@ same version, even if the package is upgraded under a running process.
 SANDBOX_TOOLS_DIR = f"/var/tmp/.da7be258e003d428-v{SANDBOX_TOOLS_VERSION}"
 
 SANDBOX_CLI = f"{SANDBOX_TOOLS_DIR}/{SANDBOX_TOOLS_BASE_NAME}"
+
+
+def uses_python_sandbox_tools(sandbox: "SandboxEnvironment") -> bool:
+    """Whether this sandbox runs the helper with the host Python interpreter."""
+    from .events import SandboxEnvironmentProxy
+    from .local import LocalSandboxEnvironment
+
+    if sys.platform != "darwin":
+        return False
+    if isinstance(sandbox, SandboxEnvironmentProxy):
+        try:
+            sandbox = sandbox.as_type(LocalSandboxEnvironment)
+        except TypeError:
+            return False
+    return isinstance(sandbox, LocalSandboxEnvironment)
+
+
+def sandbox_tools_command(sandbox: "SandboxEnvironment") -> list[str]:
+    """Command prefix for the helper in this sandbox."""
+    if uses_python_sandbox_tools(sandbox):
+        return [sys.executable, "-m", "inspect_sandbox_tools._cli.main"]
+    return [SANDBOX_CLI]
 
 
 def tools_user_param(

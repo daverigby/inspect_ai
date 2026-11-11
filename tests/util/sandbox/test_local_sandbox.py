@@ -1,12 +1,30 @@
+import json
 import os
+import sys
 import warnings
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import anyio
+import psutil
 import pytest
+from test_helpers.sandbox import CannedSandbox
+from test_helpers.utils import skip_if_no_mcp_package
 
+from inspect_ai.model import ContentText
 from inspect_ai.util import SandboxUserUnsupportedError
-from inspect_ai.util._sandbox._cli import SANDBOX_CLI
+from inspect_ai.util._sandbox._cli import SANDBOX_CLI, sandbox_tools_command
+from inspect_ai.util._sandbox.context import (
+    sandbox_default_context_var,
+    sandbox_environments_context_var,
+    sandbox_with_environments_context_var,
+)
+from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+from inspect_ai.util._sandbox.exec_remote import (
+    ExecRemoteAwaitableOptions,
+    ExecRemoteStreamingOptions,
+)
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 from inspect_ai.util._subprocess import ExecResult
 
@@ -257,3 +275,104 @@ async def test_sample_cleanup_continues_after_server_stop_failure(
         "Failed to stop local sandbox-tools server: %s",
         failing_stop.side_effect,
     )
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_helper_command_uses_python_only_on_local_macos(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    local = LocalSandboxEnvironment()
+    other = CannedSandbox.returning(ExecResult(True, 0, "", ""))
+    try:
+        expected = (
+            [sys.executable, "-m", "inspect_sandbox_tools._cli.main"]
+            if platform == "darwin"
+            else [SANDBOX_CLI]
+        )
+        assert sandbox_tools_command(local) == expected
+        assert sandbox_tools_command(SandboxEnvironmentProxy(local)) == expected
+        assert sandbox_tools_command(other) == [SANDBOX_CLI]
+        assert sandbox_tools_command(SandboxEnvironmentProxy(other)) == [SANDBOX_CLI]
+    finally:
+        local.directory.cleanup()
+
+
+@pytest.fixture
+async def macos_local_sandbox() -> AsyncIterator[SandboxEnvironmentProxy]:
+    if sys.platform != "darwin":
+        pytest.skip("requires native macOS helper execution")
+    local = LocalSandboxEnvironment()
+    proxy = SandboxEnvironmentProxy(local)
+    env_token = sandbox_environments_context_var.set({"default": proxy})
+    default_token = sandbox_default_context_var.set("default")
+    cache_token = sandbox_with_environments_context_var.set({})
+    try:
+        yield proxy
+    finally:
+        processes: list[psutil.Process] = []
+        pid_file = local._sandbox_tools_dir / "server.pid"
+        if pid_file.exists():
+            server = psutil.Process(json.loads(pid_file.read_text())["pid"])
+            processes = [server, *server.children(recursive=True)]
+        with anyio.CancelScope(shield=True):
+            await LocalSandboxEnvironment.sample_cleanup(
+                "test", None, {"default": local}, interrupted=False
+            )
+            with anyio.fail_after(5):
+                while any(process.is_running() for process in processes):
+                    await anyio.sleep(0.05)
+        sandbox_with_environments_context_var.reset(cache_token)
+        sandbox_default_context_var.reset(default_token)
+        sandbox_environments_context_var.reset(env_token)
+        assert not Path(local.directory.name).exists()
+
+
+async def test_macos_local_exec_remote(
+    macos_local_sandbox: SandboxEnvironmentProxy,
+) -> None:
+    direct = await macos_local_sandbox.exec(["/bin/echo", "direct execution works"])
+    assert direct.success and direct.stdout.strip() == "direct execution works"
+    result = await macos_local_sandbox.exec_remote(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print(sys.stdin.read(), sys.argv[1])",
+            "a b'c",
+        ],
+        options=ExecRemoteAwaitableOptions(input="remote execution works", timeout=20),
+        stream=False,
+    )
+    assert result.success
+    assert result.stdout.strip() == "remote execution works a b'c"
+
+
+async def test_macos_local_cleanup_stops_unfinished_process(
+    macos_local_sandbox: SandboxEnvironmentProxy,
+) -> None:
+    process = await macos_local_sandbox.exec_remote(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        options=ExecRemoteStreamingOptions(),
+    )
+    assert psutil.Process(process.pid).is_running()
+    # The fixture verifies that sample cleanup stops the unfinished process.
+
+
+@skip_if_no_mcp_package
+async def test_macos_local_mcp_server(
+    macos_local_sandbox: SandboxEnvironmentProxy,
+) -> None:
+    from inspect_ai.tool import mcp_connection, mcp_server_sandbox
+    from inspect_ai.tool._tool_def import ToolDef
+
+    server_script = Path(__file__).parents[2] / "tools" / "mcp_test_server.py"
+    server = mcp_server_sandbox(command=sys.executable, args=[str(server_script)])
+    async with mcp_connection(server):
+        tools = {ToolDef(tool).name: tool for tool in await server.tools()}
+        assert {"echo", "add", "get_status", "get_info"} <= tools.keys()
+        echo = await tools["echo"](message="hello from macOS")
+        addition = await tools["add"](x=20, y=22)
+        assert isinstance(echo, list) and isinstance(echo[0], ContentText)
+        assert echo[0].text == "hello from macOS"
+        assert isinstance(addition, list) and isinstance(addition[0], ContentText)
+        assert addition[0].text == "42"

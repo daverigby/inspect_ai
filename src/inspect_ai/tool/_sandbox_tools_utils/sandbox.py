@@ -33,6 +33,7 @@ from inspect_ai.util._sandbox._cli import (
     SANDBOX_TOOLS_BASE_NAME,
     SANDBOX_TOOLS_DIR,
     SANDBOX_TOOLS_VERSION,
+    uses_python_sandbox_tools,
 )
 from inspect_ai.util._sandbox._framework_directory import (
     FrameworkDirectoryError,
@@ -175,6 +176,10 @@ async def _sandbox_tools_installed(sandbox: SandboxEnvironment) -> bool:
 
 
 async def _detect_sandbox_tools(sandbox: SandboxEnvironment) -> bool:
+    if uses_python_sandbox_tools(sandbox):
+        await _set_tools_user(sandbox, None)
+        return True
+
     if sandbox._tools_user_resolved or sandbox._tools_user is not None:
         return await _tools_installed_as(sandbox, sandbox._tools_user)
 

@@ -7,7 +7,7 @@ from typing import Literal, Union, overload
 from typing_extensions import override
 
 from .._subprocess import ExecResult, subprocess
-from ._cli import SANDBOX_CLI
+from ._cli import SANDBOX_CLI, sandbox_tools_command, uses_python_sandbox_tools
 from .environment import (
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
@@ -93,7 +93,10 @@ class LocalSandboxEnvironment(SandboxEnvironment):
             final_cwd = self.directory.name / final_cwd
 
         final_env = env
-        if cmd and cmd[0] == SANDBOX_CLI:
+        tools_command = sandbox_tools_command(self)
+        if cmd and (
+            cmd[0] == SANDBOX_CLI or cmd[: len(tools_command)] == tools_command
+        ):
             self._sandbox_tools_used = True
             final_env = {
                 **(env or {}),
@@ -114,11 +117,11 @@ class LocalSandboxEnvironment(SandboxEnvironment):
     async def _stop_sandbox_tools(self, *, timeout: int) -> None:
         if not self._sandbox_tools_used or not self._sandbox_tools_dir.exists():
             return
-        if not Path(SANDBOX_CLI).exists():
+        if not uses_python_sandbox_tools(self) and not Path(SANDBOX_CLI).exists():
             raise RuntimeError("Cannot stop local sandbox-tools server: CLI is missing")
 
         result = await self.exec(
-            [SANDBOX_CLI, "stop-server"],
+            [*sandbox_tools_command(self), "stop-server"],
             cwd="/",
             timeout=timeout,
             timeout_retry=False,

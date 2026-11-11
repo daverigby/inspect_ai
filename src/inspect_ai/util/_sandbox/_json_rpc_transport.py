@@ -20,7 +20,7 @@ from inspect_ai._util._json_rpc import (
 if TYPE_CHECKING:
     from .environment import SandboxEnvironment
 
-from ._cli import SANDBOX_CLI
+from ._cli import sandbox_tools_command
 from ._framework_operation import framework_sandbox_operation
 from .limits import SandboxEnvironmentLimits
 
@@ -99,7 +99,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         env = {_JSON_RPC_RESPONSE_MAX_BYTES_ENV: str(max_response_bytes)}
         with framework_sandbox_operation():
             exec_result = await self.sandbox.exec(
-                [SANDBOX_CLI, "exec"],
+                [*sandbox_tools_command(self.sandbox), "exec"],
                 input=request,
                 env=env,
                 timeout=transport_extra_args.get("timeout", None),

@@ -60,8 +60,8 @@ A provider that merges the streams or drops stderr makes every call here fail as
 
 Image requirement: the script runs under ``/bin/sh`` with ``PATH`` fixed to
 ``/usr/sbin:/usr/bin:/sbin:/bin`` (the shared pin in
-:mod:`inspect_ai.util._sandbox._privileged`), so ``stat``, ``id``, ``mkdir``,
-``chmod``, and any command a caller wraps must live in one of those four
+:mod:`inspect_ai.util._sandbox._privileged`), so ``uname``, ``stat``, ``id``,
+``mkdir``, ``chmod``, and any command a caller wraps must live in one of those four
 directories. An image whose coreutils live elsewhere (a Nix-style store, or only
 under ``/usr/local``) fails with :class:`FrameworkDirectoryUnavailableError` naming
 the missing tool rather than picking up whatever the inherited ``PATH`` offers.
@@ -109,10 +109,10 @@ _VERIFIED_MARKER = "INSPECT_FRAMEWORK_DIRECTORY_VERIFIED"
 # $3 = repair-mode flag (1/0), $4 = required mode (octal, as `stat -c %a` prints
 # it; the sticky 1777 selects the shared policy), $5 = parent path, $6 = leaf name,
 # $7.. = command to exec with the verified directory as cwd (optional). POSIX sh
-# only (dash/BusyBox):
-# no arrays, no [[ ]], no local. `stat -c %u/%a` is common to GNU coreutils and
-# BusyBox. `umask 077` closes the window in BusyBox's non-atomic `mkdir -m`
-# (mkdir(0777) then chmod) and also applies to whatever the wrapped command creates:
+# only: no arrays, no [[ ]], no local. GNU/BusyBox and BSD stat formats are
+# selected by the sandbox OS. `umask 077` closes the window in BusyBox's non-atomic
+# `mkdir -m` (mkdir(0777) then chmod) and also applies to whatever the wrapped
+# command creates:
 # a non-root `tar` extracts entries at 0700/0600 instead of the archive's modes
 # (root's `tar` preserves them). Inside a 0700 directory used by one uid this changes
 # nothing observable; a caller using a wider directory mode must widen the mode of
@@ -133,6 +133,20 @@ umask 077
 unset CDPATH
 PATH=@PATH@
 export PATH
+if [ "$(uname -s)" = Darwin ]; then
+    stat_permissions() {
+        bits=$(stat -f '%p' "$1") || return $?
+        printf '%o\\n' "$((0$bits & 07777))"
+    }
+    stat_identity() {
+        owner=$(stat -f '%u' "$1") || return $?
+        printf '%s ' "$owner"
+        stat_permissions "$1"
+    }
+else
+    stat_identity() { stat -c '%u %a' "$1"; }
+    stat_permissions() { stat -c '%a' "$1"; }
+fi
 expect=$1 create=$2 repair=$3 want=$4 parent=$5 leaf=$6
 shift 6
 case $parent in
@@ -169,7 +183,7 @@ fi
 # default user) with nothing at $dir to remove.
 err=$(cd -P -- "$parent" 2>&1) || unavailable "cannot enter parent directory $parent: $err"
 cd -P -- "$parent" || unavailable "cannot enter parent directory $parent"
-pstat=$(stat -c '%u %a' . 2>/dev/null) || unavailable "cannot stat parent directory $parent: $(stat -c '%u %a' . 2>&1 >/dev/null)"
+pstat=$(stat_identity . 2>/dev/null) || unavailable "cannot stat parent directory $parent: $(stat_identity . 2>&1 >/dev/null)"
 puid=${pstat% *}
 pmode=${pstat#* }
 if [ "$puid" != "$me" ] && [ "$puid" != 0 ]; then
@@ -199,7 +213,7 @@ err=$(cd -P -- "$leaf" 2>&1) || violation "cannot enter $dir: $err"
 cd -P -- "$leaf" || violation "cannot enter $dir"
 now=$(pwd -P)
 [ "$now" = "$expected" ] || violation "$dir resolves to $now through a symbolic link"
-dstat=$(stat -c '%u %a' . 2>/dev/null) || unavailable "cannot stat $dir: $(stat -c '%u %a' . 2>&1 >/dev/null)"
+dstat=$(stat_identity . 2>/dev/null) || unavailable "cannot stat $dir: $(stat_identity . 2>&1 >/dev/null)"
 uid=${dstat% *}
 mode=${dstat#* }
 accept="uid $me"
@@ -223,14 +237,14 @@ if [ "$mode" != "$want" ]; then
         else
             chmod u-s,g-s,-t . && chmod "$want" . || violation "could not set mode of $dir"
         fi
-        mode=$(stat -c %a . 2>/dev/null) || unavailable "cannot stat $dir: $(stat -c %a . 2>&1 >/dev/null)"
+        mode=$(stat_permissions . 2>/dev/null) || unavailable "cannot stat $dir: $(stat_permissions . 2>&1 >/dev/null)"
     fi
 fi
 if [ "$shared" = 1 ] && [ "$created" = 0 ] && [ "$mode" != "$want" ]; then
     # `mkdir -m 1777` sets the mode in a second step (BusyBox and GNU alike), so a
     # concurrent creator may still be mid-way: look once more before refusing.
     sleep 1
-    mode=$(stat -c %a . 2>/dev/null) || unavailable "cannot stat $dir: $(stat -c %a . 2>&1 >/dev/null)"
+    mode=$(stat_permissions . 2>/dev/null) || unavailable "cannot stat $dir: $(stat_permissions . 2>&1 >/dev/null)"
 fi
 [ "$mode" = "$want" ] || violation "$dir has mode $mode, expected $want"
 printf '%s\\n' @VERIFIED@ >&2
@@ -821,9 +835,18 @@ def _private_mode(mode: int) -> int:
 # Prints the raw st_mode of $1 in hex (as `stat -c %f` does, without following a
 # symlink) or the word "missing" when nothing is there, so absence and a stat
 # failure are told apart by the host.
-_STAT_ENTRY = (
-    'if [ -e "$1" ] || [ -L "$1" ]; then stat -c %f -- "$1"; else echo missing; fi'
-)
+_STAT_ENTRY = """
+if [ -e "$1" ] || [ -L "$1" ]; then
+    if [ "$(uname -s)" = Darwin ]; then
+        mode=$(stat -f '%p' -- "$1") || exit $?
+        printf '%x\\n' "$((0$mode))"
+    else
+        stat -c %f -- "$1"
+    fi
+else
+    echo missing
+fi
+"""
 
 
 async def stat_in_framework_directory(
@@ -913,7 +936,7 @@ def framework_file_mode(mode: int) -> str:
 
 # Writes stdin to a temporary name ($1.tmp) in the verified directory, sets its mode
 # to $2 (the helper's `umask 077` would otherwise leave it private to the owner),
-# and publishes it as $1 with `ln -T`, which fails rather than replacing an existing
+# and publishes it as $1 with `ln -T` (`link` on macOS), refusing an existing
 # entry (`mv` would replace one; without `-T` a directory at $1 would receive the
 # link inside it; `ln` also fails on a filesystem without hard links, which then
 # surfaces as a write error). The temporary name is cleared
@@ -926,7 +949,8 @@ def framework_file_mode(mode: int) -> str:
 # whether or not `ln` succeeded.
 _WRITE_ENTRY = (
     'rm -f -- "$1.tmp" && set -C && cat > "$1.tmp" && chmod -- "$2" "$1.tmp" || exit; '
-    'ln -T -- "$1.tmp" "$1"; rc=$?; rm -f -- "$1.tmp"; exit $rc'
+    'if [ "$(uname -s)" = Darwin ]; then link "./$1.tmp" "./$1"; '
+    'else ln -T -- "$1.tmp" "$1"; fi; rc=$?; rm -f -- "$1.tmp"; exit $rc'
 )
 
 

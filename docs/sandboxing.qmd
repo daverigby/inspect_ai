@@ -108,6 +108,8 @@ There are two sandbox environments built in to Inspect and six available as exte
 
 The `local` environment always executes as the current effective user. On POSIX systems, `exec(user=...)` accepts that user's name or UID; other identities raise `SandboxUserUnsupportedError` before execution. On other platforms, omit `user`.
 
+On macOS, the `local` environment runs Inspect's bundled Python helper with the evaluation's Python interpreter. This supports `exec_remote()` and `mcp_server_sandbox()` without a Linux container or a separate helper installation. Each sample has its own helper state, which is removed after its processes are stopped during cleanup. Commands run with the host user's permissions and access to host files; `local` provides no filesystem or network isolation.
+
 Sandbox environment definitions can be bound at the `Sample`, `Task`, or `eval()` level. Binding precedence goes from `eval()`, to `Task` to `Sample`, however sandbox config files defined on the `Sample` always take precedence when the sandbox type for the `Sample` is the same as the enclosing `Task` or `eval()`.
 
 Here is a `Task` that defines a `sandbox`:

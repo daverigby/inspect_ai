@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 include = ["inspect_sandbox_tools*"]
 
+[tool.setuptools.dynamic]
+version = {attr = "inspect_sandbox_tools.__version__"}
+
 [tool.setuptools.package-data]
 "inspect_sandbox_tools" = ["**/*.svg", "**/*.md"]
 
@@ -73,13 +76,12 @@ ignore = ["W002", "W009"]
 
 [project]
 name = "inspect_sandbox_tools"
-version = "1.4.1"
+dynamic = ["version"]
 description = "Sandbox container tool code for inspect_ai"
 authors = [{ name = "UK AI Security Institute" }]
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT License" }
-# dynamic = ["version", "dependencies"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

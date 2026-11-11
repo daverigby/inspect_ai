@@ -2,9 +2,9 @@
 
 The helper's verification is a POSIX ``sh`` script run inside the sandbox, so most
 tests here run it for real through ``LocalSandboxEnvironment`` against a temporary
-parent directory on the host (Linux only, via the ``local`` fixture: the script
-relies on ``stat -c``). Tests that need another uid, a missing tool, or a lost
-``mkdir`` race arrange it with a ``PATH`` shim. The remaining tests run anywhere:
+parent directory on the host (Linux and macOS, via the ``local`` fixture). Tests
+that need another uid, a missing tool, or a lost ``mkdir`` race arrange it with a
+``PATH`` shim. The remaining tests run anywhere:
 path splitting, script syntax, and a scripted fake sandbox covering the Python-side
 classification of results a provider might return.
 """
@@ -67,9 +67,9 @@ def parent(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def local() -> Iterator[LocalSandboxEnvironment]:
-    """A real local sandbox for running the verification script (Linux only)."""
-    if sys.platform != "linux":
-        pytest.skip("verification script requires GNU/BusyBox stat")
+    """A real local sandbox for running the verification script."""
+    if sys.platform not in ("linux", "darwin"):
+        pytest.skip("verification script requires GNU/BusyBox or BSD stat")
     sandbox = LocalSandboxEnvironment()
     yield sandbox
     sandbox.directory.cleanup()
@@ -392,7 +392,7 @@ async def test_repair_mode_does_not_touch_directory_owned_by_another_uid(
 ) -> None:
     """Pretend to be uid 4242 under root-owned /var/tmp: the directory is not ours."""
     bindir = _tool_dir(
-        tmp_path, ["sh", "stat", "mkdir", "chmod", "pwd"], {"id": "echo 4242"}
+        tmp_path, ["sh", "uname", "stat", "mkdir", "chmod", "pwd"], {"id": "echo 4242"}
     )
     sandbox = _ScriptOverrideSandbox(local, _script_with_path(bindir))
     target = Path("/var/tmp") / f".inspect-fw-test-{uuid.uuid4().hex}"
@@ -473,7 +473,9 @@ async def test_rejects_directory_owned_by_another_uid(
     if os.getuid() == 0:
         pytest.skip("requires a non-root test user")
     with pytest.raises(FrameworkDirectoryError, match="owned by uid 0, expected uid"):
-        await exec_in_framework_directory(local, "/tmp", ["true"], user=None)
+        await exec_in_framework_directory(
+            local, str(Path("/tmp").resolve()), ["true"], user=None
+        )
 
 
 async def test_rejects_parent_owned_by_another_non_root_uid(
@@ -483,7 +485,7 @@ async def test_rejects_parent_owned_by_another_non_root_uid(
     if os.getuid() == 0:
         pytest.skip("requires a non-root test user (a root-owned parent is accepted)")
     bindir = _tool_dir(
-        tmp_path, ["sh", "stat", "mkdir", "chmod", "pwd"], {"id": "echo 4242"}
+        tmp_path, ["sh", "uname", "stat", "mkdir", "chmod", "pwd"], {"id": "echo 4242"}
     )
     sandbox = _ScriptOverrideSandbox(local, _script_with_path(bindir))
     target = parent / "fw"
@@ -538,7 +540,7 @@ async def test_tool_warnings_on_stderr_do_not_corrupt_values(
     assert real_id and real_stat
     bindir = _tool_dir(
         tmp_path,
-        ["sh", "mkdir", "chmod", "pwd"],
+        ["sh", "uname", "mkdir", "chmod", "pwd"],
         {
             "id": f'echo "id: spurious warning" >&2; exec {real_id} "$@"',
             "stat": f'echo "stat: spurious warning" >&2; exec {real_stat} "$@"',
@@ -556,7 +558,9 @@ async def test_garbage_from_id_is_unavailable_not_violation(
     local: LocalSandboxEnvironment, parent: Path, tmp_path: Path
 ) -> None:
     bindir = _tool_dir(
-        tmp_path, ["sh", "stat", "mkdir", "chmod", "pwd"], {"id": "echo not-a-uid"}
+        tmp_path,
+        ["sh", "uname", "stat", "mkdir", "chmod", "pwd"],
+        {"id": "echo not-a-uid"},
     )
     sandbox = _ScriptOverrideSandbox(local, _script_with_path(bindir))
     target = parent / "fw"
@@ -642,7 +646,7 @@ async def test_shared_rejects_directory_owned_by_another_non_root_uid(
     if os.getuid() == 0:
         pytest.skip("requires a non-root test user (root's directory is shareable)")
     bindir = _tool_dir(
-        tmp_path, ["sh", "stat", "mkdir", "chmod", "pwd"], {"id": "echo 4242"}
+        tmp_path, ["sh", "uname", "stat", "mkdir", "chmod", "pwd"], {"id": "echo 4242"}
     )
     sandbox = _ScriptOverrideSandbox(local, _script_with_path(bindir))
     target = Path("/var/tmp") / f".inspect-fw-test-{uuid.uuid4().hex}"
@@ -676,10 +680,13 @@ async def test_shared_tolerates_a_concurrent_creator_still_setting_the_mode(
     target.chmod(0o1777)
     bindir = _tool_dir(
         tmp_path,
-        ["sh", "id", "mkdir", "chmod", "pwd"],
+        ["sh", "uname", "id", "mkdir", "chmod", "pwd"],
         {
-            "stat": f'if [ "$2" = "%u %a" ] && [ "$(pwd -P)" = "{target.resolve()}" ]; '
-            f'then echo "$(id -u) 1755"; else exec "{real_stat}" "$@"; fi'
+            "stat": f'if [ "$(pwd -P)" = "{target.resolve()}" ]; then '
+            'if [ "$2" = "%u %a" ]; then echo "$(id -u) 1755"; exit; fi; '
+            f'if [ "$2" = "%p" ] && [ ! -e "{tmp_path}/stat-read" ]; then '
+            f': > "{tmp_path}/stat-read"; echo 41755; exit; fi; fi; '
+            f'exec "{real_stat}" "$@"'
         },
     )
     sandbox = _ScriptOverrideSandbox(local, _script_with_path(bindir))
@@ -944,7 +951,7 @@ async def test_command_cannot_forge_a_verdict(
 async def test_missing_stat_is_reported_as_unavailable_not_violation(
     local: LocalSandboxEnvironment, parent: Path, tmp_path: Path
 ) -> None:
-    bindir = _tool_dir(tmp_path, ["sh", "id", "mkdir", "chmod", "pwd"], {})
+    bindir = _tool_dir(tmp_path, ["sh", "uname", "id", "mkdir", "chmod", "pwd"], {})
     sandbox = _ScriptOverrideSandbox(local, _script_with_path(bindir))
     with pytest.raises(FrameworkDirectoryUnavailableError, match="cannot stat"):
         await ensure_framework_directory(sandbox, str(parent / "fw"), user=None)
@@ -960,7 +967,7 @@ async def test_concurrent_creators_both_end_with_a_verified_directory(
     # again so the script's own attempt observes EEXIST, as the loser would.
     bindir = _tool_dir(
         tmp_path,
-        ["sh", "id", "stat", "chmod", "pwd"],
+        ["sh", "uname", "id", "stat", "chmod", "pwd"],
         {"mkdir": f'"{real_mkdir}" "$@" >/dev/null 2>&1\n"{real_mkdir}" "$@"'},
     )
     sandbox = _ScriptOverrideSandbox(local, _script_with_path(bindir))
